@@ -1291,6 +1291,9 @@ if [ -n "$VM_RESOURCE_POOL" ]; then
     msg_info "Resource pool '${VM_RESOURCE_POOL}' not found"
     msg_ok "Skipping pool assignment"
   fi
+else
+  msg_info "No resource pool specified"
+  msg_ok "Skipping pool assignment"
 fi
 
 # ── Start VM ──
