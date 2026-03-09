@@ -27,6 +27,7 @@ from .smbios import generate_smbios, SmbiosIdentity
 class WizardState:
     selected_os: str = ""
     selected_storage: str = ""
+    selected_secondary_storage: str = ""
     storage_targets: list[str] = field(default_factory=list)
     iso_dirs: list[str] = field(default_factory=list)
     selected_iso_dir: str = ""
@@ -296,11 +297,16 @@ class NextApp(App):
 
             # Step 3 — Choose Storage
             with Vertical(id="step3", classes="step_container step_hidden"):
-                yield Static("Choose Storage Target")
+                yield Static("Choose Primary Storage")
                 with Horizontal(id="storage_row"):
                     for idx, target in enumerate(self.state.storage_targets):
                         cls = "storage_btn storage_selected" if idx == 0 else "storage_btn"
                         yield Button(target, id=f"storage_{idx}", classes=cls)
+                yield Static("Choose Fallback Storage (optional)")
+                with Horizontal(id="secondary_storage_row"):
+                    yield Button("None", id="sec_storage_none", classes="storage_btn storage_selected")
+                    for idx, target in enumerate(self.state.storage_targets):
+                        yield Button(target, id=f"sec_storage_{idx}", classes="storage_btn")
                 with Horizontal(classes="nav_row"):
                     yield Button("Back", id="back_btn_3")
                     yield Button("Next", id="next_btn_3")
@@ -401,6 +407,18 @@ class NextApp(App):
             try:
                 idx = int(bid.split("_")[1])
                 self._select_storage(self.state.storage_targets[idx])
+            except (ValueError, IndexError):
+                pass
+            return
+
+        # Secondary storage selection
+        if bid == "sec_storage_none":
+            self._select_secondary_storage("")
+            return
+        if bid.startswith("sec_storage_"):
+            try:
+                idx = int(bid.split("_")[2])
+                self._select_secondary_storage(self.state.storage_targets[idx])
             except (ValueError, IndexError):
                 pass
             return
@@ -546,6 +564,22 @@ class NextApp(App):
             else:
                 btn.remove_class("storage_selected")
 
+    def _select_secondary_storage(self, target: str) -> None:
+        self.state.selected_secondary_storage = target
+        # Update "None" button
+        none_btn = self.query_one("#sec_storage_none", Button)
+        if target == "":
+            none_btn.add_class("storage_selected")
+        else:
+            none_btn.remove_class("storage_selected")
+        # Update storage buttons
+        for idx in range(len(self.state.storage_targets)):
+            btn = self.query_one(f"#sec_storage_{idx}", Button)
+            if self.state.storage_targets[idx] == target:
+                btn.add_class("storage_selected")
+            else:
+                btn.remove_class("storage_selected")
+
     # ── Step 4: Configuration ───────────────────────────────────────
 
     def _prefill_form(self) -> None:
@@ -557,6 +591,7 @@ class NextApp(App):
         self._set_input_value("#disk", str(default_disk_gb(macos)))
         self._set_input_value("#bridge", DEFAULT_BRIDGE)
         self._set_input_value("#storage_input", self.state.selected_storage)
+        self._set_input_value("#secondary_storage", self.state.selected_secondary_storage)
         self._set_input_value("#iso_dir", self.state.selected_iso_dir)
         self._set_input_value("#installer_path", "")
         self._update_smbios_preview()
