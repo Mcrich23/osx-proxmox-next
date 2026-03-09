@@ -24,11 +24,6 @@ if ! [[ "$GEN_MAC" =~ ^([0-9A-F]{2}:){5}[0-9A-F]{2}$ ]]; then
 fi
 APPLE_SERVICES="false"
 
-# Resource pool assignment can be customized via OSXPN_VM_POOL; defaults to
-# cyber_defense_group for internal deployments but will be skipped automatically
-# if that pool does not exist on the host.
-VM_RESOURCE_POOL="${OSXPN_VM_POOL:-cyber_defense_group}"
-
 YW=$(echo "\033[33m")
 BL=$(echo "\033[36m")
 RD=$(echo "\033[01;31m")
@@ -1276,25 +1271,6 @@ EOF
 )
 qm set "$VMID" -description "$DESCRIPTION" >/dev/null
 msg_ok "Created ${MACOS_LABELS[$MACOS_VER]} VM ${CL}${BL}(${HN})"
-
-# ── Add VM to resource pool (if available) ──
-if [ -n "$VM_RESOURCE_POOL" ]; then
-  if pvesh get "/pools/${VM_RESOURCE_POOL}" >/dev/null 2>&1; then
-    msg_info "Adding VM to ${VM_RESOURCE_POOL} pool"
-    if pveum pool modify "$VM_RESOURCE_POOL" --vms "$VMID" >/dev/null 2>&1; then
-      msg_ok "Added VM ${CL}${BL}$VMID${CL} to ${VM_RESOURCE_POOL} pool"
-    else
-      msg_error "Failed to add VM ${VMID} to ${VM_RESOURCE_POOL} pool"
-      echo -e "  Hint: Check Proxmox permissions or set OSXPN_VM_POOL='' to skip."
-    fi
-  else
-    msg_info "Resource pool '${VM_RESOURCE_POOL}' not found"
-    msg_ok "Skipping pool assignment"
-  fi
-else
-  msg_info "No resource pool specified"
-  msg_ok "Skipping pool assignment"
-fi
 
 # ── Start VM ──
 if [ "$START_VM" == "yes" ]; then
