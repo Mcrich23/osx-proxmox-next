@@ -374,6 +374,7 @@ class NextApp(App):
                 yield ProgressBar(total=1, show_eta=False, id="live_progress", classes="hidden")
                 yield Static("", id="live_log", classes="hidden")
                 yield Static("", id="result_box", classes="hidden")
+                yield Button("Quit", id="quit_btn", classes="hidden")
                 with Horizontal(classes="nav_row"):
                     yield Button("Back", id="back_btn_6")
 
@@ -443,6 +444,7 @@ class NextApp(App):
             "mode_manage": lambda: self._toggle_mode("manage"),
             "manage_refresh_btn": self._refresh_vm_list,
             "manage_destroy_btn": self._run_destroy,
+            "quit_btn": lambda: self.exit(),
         }
         handler = handlers.get(bid)
         if handler:
@@ -970,7 +972,10 @@ class NextApp(App):
             ]
             result_box.update("\n".join(lines))
             self.notify("macOS VM created", severity="information")
-        else:
+
+        self.query_one("#quit_btn", Button).remove_class("hidden")
+
+        if not ok:
             result_box.add_class("result_fail")
             lines = ["Install FAILED.", f"Log: {log_path}"]
             if snapshot:
