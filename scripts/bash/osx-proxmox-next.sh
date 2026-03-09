@@ -1272,11 +1272,6 @@ EOF
 qm set "$VMID" -description "$DESCRIPTION" >/dev/null
 msg_ok "Created ${MACOS_LABELS[$MACOS_VER]} VM ${CL}${BL}(${HN})"
 
-# ── Add VM to resource pool ──
-msg_info "Adding VM to cyber_defense_group pool"
-pveum pool modify cyber_defense_group --vms "$VMID"
-msg_ok "Added VM ${CL}${BL}$VMID${CL} to cyber_defense_group pool"
-
 # ── Start VM ──
 if [ "$START_VM" == "yes" ]; then
   msg_info "Starting macOS VM"
