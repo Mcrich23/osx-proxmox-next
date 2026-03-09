@@ -320,6 +320,10 @@ def build_plan(config: VmConfig) -> list[PlanStep]:
             argv=["qm", "set", vmid, "--boot", "order=ide2;virtio0;ide0"],
         ),
         PlanStep(
+            title="Add VM to resource pool",
+            argv=["pvesh", "set", "/pools/cyber_defense_group", "--vms", vmid],
+        ),
+        PlanStep(
             title="Start VM",
             argv=["qm", "start", vmid],
             risk="action",
