@@ -792,3 +792,74 @@ def test_build_plan_oc_base64_no_newlines(monkeypatch) -> None:
     encoded = base64.b64encode(b"C02LNGSERL12").decode()
     assert "\n" not in encoded
     assert f"serial={encoded}" in smbios.command
+
+
+# ── Secondary storage fallback tests ─────────────────────────────
+
+
+def test_build_plan_no_secondary_storage_no_fallback() -> None:
+    """Without secondary_storage, disk steps use direct qm set (no bash -c wrapper)."""
+    cfg = _cfg("sequoia")
+    cfg.secondary_storage = ""
+    steps = build_plan(cfg)
+    efi = next(step for step in steps if step.title == "Attach EFI disk")
+    tpm = next(step for step in steps if step.title == "Attach TPM")
+    disk = next(step for step in steps if step.title == "Create main disk")
+    # Direct qm commands, not bash wrappers
+    assert efi.argv[0] == "qm"
+    assert tpm.argv[0] == "qm"
+    assert disk.argv[0] == "qm"
+    assert "local-lvm" in efi.command
+    assert "local-lvm" in tpm.command
+    assert "local-lvm" in disk.command
+
+
+def test_build_plan_with_secondary_storage_has_fallback() -> None:
+    """With secondary_storage, disk steps wrap in bash with try/fallback logic."""
+    cfg = _cfg("sequoia")
+    cfg.secondary_storage = "local"
+    steps = build_plan(cfg)
+    efi = next(step for step in steps if step.title == "Attach EFI disk")
+    tpm = next(step for step in steps if step.title == "Attach TPM")
+    disk = next(step for step in steps if step.title == "Create main disk")
+    # Should be bash -c wrappers with both storages
+    assert efi.argv[0] == "bash"
+    assert "local-lvm" in efi.command
+    assert "local" in efi.command
+    assert tpm.argv[0] == "bash"
+    assert disk.argv[0] == "bash"
+    assert "local-lvm" in disk.command
+
+
+def test_build_plan_efi_tpm_are_separate_steps() -> None:
+    """EFI and TPM must be separate steps for independent fallback."""
+    cfg = _cfg("sequoia")
+    steps = build_plan(cfg)
+    titles = [step.title for step in steps]
+    assert "Attach EFI disk" in titles
+    assert "Attach TPM" in titles
+    # Must not have the old combined step
+    assert "Attach EFI + TPM" not in titles
+
+
+def test_build_plan_import_fallback() -> None:
+    """With secondary_storage, import steps contain fallback logic."""
+    cfg = _cfg("sequoia")
+    cfg.secondary_storage = "local"
+    steps = build_plan(cfg)
+    oc = next(step for step in steps if step.title == "Import and attach OpenCore disk")
+    rec = next(step for step in steps if step.title == "Import and attach macOS recovery")
+    # Both storages in import commands
+    assert "local-lvm" in oc.command
+    assert "local" in oc.command
+    assert "local-lvm" in rec.command
+    assert "local" in rec.command
+
+
+def test_build_plan_gpt_fix_guarded() -> None:
+    """GPT header fix dd must be guarded with block-device check."""
+    cfg = _cfg("sequoia")
+    steps = build_plan(cfg)
+    oc = next(step for step in steps if step.title == "Import and attach OpenCore disk")
+    assert '[ -b "$DEV" ]' in oc.command
+    assert "|| true" in oc.command

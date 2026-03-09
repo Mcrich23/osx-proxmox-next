@@ -323,6 +323,8 @@ class NextApp(App):
                     yield Input(value=DEFAULT_BRIDGE, id="bridge")
                     yield Static("Storage", classes="label")
                     yield Input(value=DEFAULT_STORAGE, id="storage_input")
+                    yield Static("Fallback Storage", classes="label")
+                    yield Input(value="", id="secondary_storage", placeholder="Optional fallback")
                     yield Static("ISO Storage", classes="label")
                     yield Input(value=DEFAULT_ISO_DIR, id="iso_dir")
                     yield Static("Installer Path", classes="label")
@@ -697,6 +699,7 @@ class NextApp(App):
             apple_services=self.state.apple_services,
             vmgenid=self.query_one("#custom_vmgenid", Input).value.strip().upper() if self.state.apple_services else "",
             static_mac=self.query_one("#custom_mac", Input).value.strip().upper() if self.state.apple_services else "",
+            secondary_storage=self.query_one("#secondary_storage", Input).value.strip(),
         )
 
     # ── Step 5: Review & Dry Run ────────────────────────────────────
@@ -712,7 +715,8 @@ class NextApp(App):
             f"Target: {meta.get('label', config.macos)} ({meta.get('channel', '?')})",
             f"VM: {config.vmid} / {config.name}",
             f"CPU: {cpu_label} — {config.cores} cores | Memory: {config.memory_mb} MB | Disk: {config.disk_gb} GB",
-            f"Storage: {config.storage} | Bridge: {config.bridge}",
+            f"Storage: {config.storage} | Bridge: {config.bridge}"
+            + (f" | Fallback: {config.secondary_storage}" if config.secondary_storage else ""),
         ]
         if config.installer_path:
             lines.append(f"Installer: {config.installer_path}")

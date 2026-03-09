@@ -38,6 +38,7 @@ def _config_from_args(args: argparse.Namespace) -> VmConfig:
         verbose_boot=args.verbose_boot,
         iso_dir=getattr(args, "iso_dir", "") or "",
         cpu_model=getattr(args, "cpu_model", "") or "",
+        secondary_storage=getattr(args, "secondary_storage", "") or "",
     )
 
 
@@ -102,6 +103,8 @@ def build_parser() -> argparse.ArgumentParser:
     common.add_argument("--disk", type=int, required=True)
     common.add_argument("--bridge", type=str, required=True)
     common.add_argument("--storage", type=str, required=True)
+    common.add_argument("--secondary-storage", type=str, default="",
+                        help="Fallback storage if primary fails for a disk operation")
     common.add_argument("--installer-path", type=str, default="")
     common.add_argument("--smbios-serial", type=str, default="")
     common.add_argument("--smbios-uuid", type=str, default="")
