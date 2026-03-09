@@ -35,6 +35,7 @@ class VmConfig:
     verbose_boot: bool = False
     iso_dir: str = ""
     cpu_model: str = ""
+    secondary_storage: str = ""
 
 
 def validate_config(config: VmConfig) -> list[str]:
@@ -79,6 +80,8 @@ def validate_config(config: VmConfig) -> list[str]:
         issues.append("CPU model must be alphanumeric/hyphens only (e.g., Skylake-Server-IBRS).")
     if config.storage and not re.fullmatch(r"[a-zA-Z0-9_\-]+", config.storage):
         issues.append("Storage target must be alphanumeric, hyphens, underscores only.")
+    if config.secondary_storage and not re.fullmatch(r"[a-zA-Z0-9_\-]+", config.secondary_storage):
+        issues.append("Secondary storage must be alphanumeric, hyphens, underscores only.")
     if config.static_mac and not re.fullmatch(r"([0-9A-F]{2}:){5}[0-9A-F]{2}", config.static_mac):
         issues.append("Static MAC must be XX:XX:XX:XX:XX:XX format (uppercase hex).")
     if config.vmgenid and not re.fullmatch(

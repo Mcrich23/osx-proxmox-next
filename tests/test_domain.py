@@ -261,3 +261,27 @@ def test_validate_name_max_length() -> None:
 def test_validate_name_at_max_length_ok() -> None:
     cfg = _valid_cfg(name="a" * 63)
     assert validate_config(cfg) == []
+
+
+# ── Secondary storage validation ─────────────────────────────────
+
+
+def test_validate_secondary_storage_accepts_valid() -> None:
+    cfg = _valid_cfg(secondary_storage="bucket")
+    assert validate_config(cfg) == []
+
+
+def test_validate_secondary_storage_accepts_empty() -> None:
+    cfg = _valid_cfg(secondary_storage="")
+    assert validate_config(cfg) == []
+
+
+def test_validate_secondary_storage_rejects_injection() -> None:
+    cfg = _valid_cfg(secondary_storage="bucket;rm")
+    issues = validate_config(cfg)
+    assert any("Secondary storage" in i for i in issues)
+
+
+def test_validate_secondary_storage_accepts_underscores() -> None:
+    cfg = _valid_cfg(secondary_storage="ceph_pool-1")
+    assert validate_config(cfg) == []

@@ -27,6 +27,7 @@ from .smbios import generate_smbios, SmbiosIdentity
 class WizardState:
     selected_os: str = ""
     selected_storage: str = ""
+    selected_secondary_storage: str = ""
     storage_targets: list[str] = field(default_factory=list)
     iso_dirs: list[str] = field(default_factory=list)
     selected_iso_dir: str = ""
@@ -296,11 +297,16 @@ class NextApp(App):
 
             # Step 3 — Choose Storage
             with Vertical(id="step3", classes="step_container step_hidden"):
-                yield Static("Choose Storage Target")
+                yield Static("Choose Primary Storage")
                 with Horizontal(id="storage_row"):
                     for idx, target in enumerate(self.state.storage_targets):
                         cls = "storage_btn storage_selected" if idx == 0 else "storage_btn"
                         yield Button(target, id=f"storage_{idx}", classes=cls)
+                yield Static("Choose Fallback Storage (optional)")
+                with Horizontal(id="secondary_storage_row"):
+                    yield Button("None", id="sec_storage_none", classes="storage_btn storage_selected")
+                    for idx, target in enumerate(self.state.storage_targets):
+                        yield Button(target, id=f"sec_storage_{idx}", classes="storage_btn")
                 with Horizontal(classes="nav_row"):
                     yield Button("Back", id="back_btn_3")
                     yield Button("Next", id="next_btn_3")
@@ -323,6 +329,8 @@ class NextApp(App):
                     yield Input(value=DEFAULT_BRIDGE, id="bridge")
                     yield Static("Storage", classes="label")
                     yield Input(value=DEFAULT_STORAGE, id="storage_input")
+                    yield Static("Fallback Storage", classes="label")
+                    yield Input(value="", id="secondary_storage", placeholder="Optional fallback")
                     yield Static("ISO Storage", classes="label")
                     yield Input(value=DEFAULT_ISO_DIR, id="iso_dir")
                     yield Static("Installer Path", classes="label")
@@ -366,6 +374,7 @@ class NextApp(App):
                 yield ProgressBar(total=1, show_eta=False, id="live_progress", classes="hidden")
                 yield Static("", id="live_log", classes="hidden")
                 yield Static("", id="result_box", classes="hidden")
+                yield Button("Quit", id="quit_btn", classes="hidden")
                 with Horizontal(classes="nav_row"):
                     yield Button("Back", id="back_btn_6")
 
@@ -403,6 +412,18 @@ class NextApp(App):
                 pass
             return
 
+        # Secondary storage selection
+        if bid == "sec_storage_none":
+            self._select_secondary_storage("")
+            return
+        if bid.startswith("sec_storage_"):
+            try:
+                idx = int(bid.split("_")[2])
+                self._select_secondary_storage(self.state.storage_targets[idx])
+            except (ValueError, IndexError):
+                pass
+            return
+
         handlers = {
             "preflight_next_btn": lambda: self._go_next(),
             "next_btn": lambda: self._go_next(),
@@ -423,6 +444,7 @@ class NextApp(App):
             "mode_manage": lambda: self._toggle_mode("manage"),
             "manage_refresh_btn": self._refresh_vm_list,
             "manage_destroy_btn": self._run_destroy,
+            "quit_btn": lambda: self.exit(),
         }
         handler = handlers.get(bid)
         if handler:
@@ -544,6 +566,22 @@ class NextApp(App):
             else:
                 btn.remove_class("storage_selected")
 
+    def _select_secondary_storage(self, target: str) -> None:
+        self.state.selected_secondary_storage = target
+        # Update "None" button
+        none_btn = self.query_one("#sec_storage_none", Button)
+        if target == "":
+            none_btn.add_class("storage_selected")
+        else:
+            none_btn.remove_class("storage_selected")
+        # Update storage buttons
+        for idx in range(len(self.state.storage_targets)):
+            btn = self.query_one(f"#sec_storage_{idx}", Button)
+            if self.state.storage_targets[idx] == target:
+                btn.add_class("storage_selected")
+            else:
+                btn.remove_class("storage_selected")
+
     # ── Step 4: Configuration ───────────────────────────────────────
 
     def _prefill_form(self) -> None:
@@ -555,6 +593,7 @@ class NextApp(App):
         self._set_input_value("#disk", str(default_disk_gb(macos)))
         self._set_input_value("#bridge", DEFAULT_BRIDGE)
         self._set_input_value("#storage_input", self.state.selected_storage)
+        self._set_input_value("#secondary_storage", self.state.selected_secondary_storage)
         self._set_input_value("#iso_dir", self.state.selected_iso_dir)
         self._set_input_value("#installer_path", "")
         self._update_smbios_preview()
@@ -697,6 +736,7 @@ class NextApp(App):
             apple_services=self.state.apple_services,
             vmgenid=self.query_one("#custom_vmgenid", Input).value.strip().upper() if self.state.apple_services else "",
             static_mac=self.query_one("#custom_mac", Input).value.strip().upper() if self.state.apple_services else "",
+            secondary_storage=self.query_one("#secondary_storage", Input).value.strip(),
         )
 
     # ── Step 5: Review & Dry Run ────────────────────────────────────
@@ -712,7 +752,8 @@ class NextApp(App):
             f"Target: {meta.get('label', config.macos)} ({meta.get('channel', '?')})",
             f"VM: {config.vmid} / {config.name}",
             f"CPU: {cpu_label} — {config.cores} cores | Memory: {config.memory_mb} MB | Disk: {config.disk_gb} GB",
-            f"Storage: {config.storage} | Bridge: {config.bridge}",
+            f"Storage: {config.storage} | Bridge: {config.bridge}"
+            + (f" | Fallback: {config.secondary_storage}" if config.secondary_storage else ""),
         ]
         if config.installer_path:
             lines.append(f"Installer: {config.installer_path}")
@@ -931,7 +972,10 @@ class NextApp(App):
             ]
             result_box.update("\n".join(lines))
             self.notify("macOS VM created", severity="information")
-        else:
+
+        self.query_one("#quit_btn", Button).remove_class("hidden")
+
+        if not ok:
             result_box.add_class("result_fail")
             lines = ["Install FAILED.", f"Log: {log_path}"]
             if snapshot:

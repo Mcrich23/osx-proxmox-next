@@ -74,6 +74,177 @@ def _cpu_args(cpu: CpuInfo, override: str = "") -> str:
     return "-cpu host,kvm=on,vendor=GenuineIntel,+kvm_pv_unhalt,+kvm_pv_eoi,+hypervisor,+invtsc,vmware-cpuid-freq=on"
 
 
+def _fallback_qm_set(vmid: str, flag: str, primary_val: str,
+                      secondary_val: str) -> str:
+    """Return a bash snippet that tries primary, falls back to secondary."""
+    return (
+        f"if qm set {shquote(vmid)} --{flag} {shquote(primary_val)} 2>&1; then true; "
+        f"else qm set {shquote(vmid)} --{flag} {shquote(secondary_val)}; fi"
+    )
+
+
+def _disk_steps(config: VmConfig, vmid: str,
+                oc_disk: Path) -> list[PlanStep]:
+    """Generate EFI, TPM, and main disk steps with optional fallback."""
+    pri = config.storage
+    sec = config.secondary_storage
+
+    if not sec:
+        # No fallback — original single-command behaviour
+        return [
+            PlanStep(
+                title="Attach EFI disk",
+                argv=["qm", "set", vmid,
+                       "--efidisk0", f"{pri}:0,efitype=4m,pre-enrolled-keys=0"],
+            ),
+            PlanStep(
+                title="Attach TPM",
+                argv=["qm", "set", vmid,
+                       "--tpmstate0", f"{pri}:0,version=v2.0"],
+            ),
+            PlanStep(
+                title="Create main disk",
+                argv=["qm", "set", vmid,
+                       "--virtio0", f"{pri}:{config.disk_gb}"],
+            ),
+        ]
+
+    # With fallback: try primary, then secondary
+    return [
+        PlanStep(
+            title="Attach EFI disk",
+            argv=[
+                "bash", "-c",
+                _fallback_qm_set(
+                    vmid, "efidisk0",
+                    f"{pri}:0,efitype=4m,pre-enrolled-keys=0",
+                    f"{sec}:0,efitype=4m,pre-enrolled-keys=0",
+                ),
+            ],
+        ),
+        PlanStep(
+            title="Attach TPM",
+            argv=[
+                "bash", "-c",
+                _fallback_qm_set(
+                    vmid, "tpmstate0",
+                    f"{pri}:0,version=v2.0",
+                    f"{sec}:0,version=v2.0",
+                ),
+            ],
+        ),
+        PlanStep(
+            title="Create main disk",
+            argv=[
+                "bash", "-c",
+                _fallback_qm_set(
+                    vmid, "virtio0",
+                    f"{pri}:{config.disk_gb}",
+                    f"{sec}:{config.disk_gb}",
+                ),
+            ],
+        ),
+    ]
+
+
+def _import_disk_script(vmid: str, source: str, primary: str,
+                        secondary: str, ide_flag: str) -> str:
+    """Return bash that imports a disk to primary, falls back to secondary."""
+    detect = ("if qm disk import --help >/dev/null 2>&1; "
+              "then IMPORT_CMD='qm disk import'; "
+              "else IMPORT_CMD='qm importdisk'; fi")
+    extract = "grep 'successfully imported' | grep -oP \"'\\K[^']+\""
+
+    if not secondary:
+        return (
+            f"{detect} && "
+            f"REF=$($IMPORT_CMD {shquote(vmid)} {shquote(source)} {shquote(primary)} 2>&1 | {extract}) && "
+            f"qm set {shquote(vmid)} --{ide_flag} \"$REF\",media=disk"
+        )
+
+    return (
+        f"{detect} && "
+        f"REF=$($IMPORT_CMD {shquote(vmid)} {shquote(source)} {shquote(primary)} 2>&1 | {extract}) || "
+        f"REF=$($IMPORT_CMD {shquote(vmid)} {shquote(source)} {shquote(secondary)} 2>&1 | {extract}); "
+        f"[ -n \"$REF\" ] && qm set {shquote(vmid)} --{ide_flag} \"$REF\",media=disk"
+    )
+
+
+def _import_steps(config: VmConfig, vmid: str,
+                  oc_disk: Path, recovery_raw: Path) -> list[PlanStep]:
+    """Generate OpenCore + recovery import steps with optional fallback."""
+    pri = config.storage
+    sec = config.secondary_storage
+
+    oc_import = _import_disk_script(
+        vmid, str(oc_disk), pri, sec, "ide0")
+    # Append GPT header fix (only for block-device storage like LVM)
+    oc_import += (
+        ' && DEV=$(pvesm path "$REF" 2>/dev/null) || true; '
+        'if [ -n "$DEV" ] && [ -b "$DEV" ]; then '
+        f'dd if={shquote(str(oc_disk))} of="$DEV" bs=512 count=2048 conv=notrunc 2>/dev/null || true; '
+        'fi'
+    )
+
+    rec_import = _import_disk_script(
+        vmid, str(recovery_raw), pri, sec, "ide2")
+
+    return [
+        PlanStep(
+            title="Import and attach OpenCore disk",
+            argv=["bash", "-c", oc_import],
+        ),
+        PlanStep(
+            title="Stamp recovery with Apple icon flavour",
+            argv=[
+                "bash", "-c",
+                # Trap to clean up loop device and temp dir on failure
+                "RLOOP=''; OC_REC=$(mktemp -d) && "
+                "trap '[ -n \"$RLOOP\" ] && { umount $OC_REC 2>/dev/null; losetup -d $RLOOP 2>/dev/null; }; rm -rf $OC_REC' EXIT; "
+                # Fix HFS+ dirty/lock flags so Linux mounts read-write,
+                # then write OpenCore .contentFlavour + .contentDetails
+                "python3 -c '"
+                "import struct,subprocess; "
+                f"img={shquote(str(recovery_raw))}; "
+                "out=subprocess.check_output([\"sgdisk\",\"-i\",\"1\",img],text=True); "
+                "start=int([l for l in out.splitlines() if \"First sector\" in l][0].split(\":\")[1].split(\"(\")[0].strip()); "
+                "off=start*512+1024+4; "
+                "f=open(img,\"r+b\"); f.seek(off); "
+                "a=struct.unpack(\">I\",f.read(4))[0]; "
+                "a=(a|0x100)&~0x800; "
+                "f.seek(off); f.write(struct.pack(\">I\",a)); "
+                "f.close(); print(\"HFS+ flags fixed\")' && "
+                # Cleanup stale loops from previous failed runs
+                f'for lo in $(losetup -j {shquote(str(recovery_raw))} -O NAME --noheadings 2>/dev/null); do umount -l $lo* 2>/dev/null; losetup -d $lo 2>/dev/null; done; '
+                f'RLOOP=$(losetup -fP --show {shquote(str(recovery_raw))}) && '
+                "{ [ -b \"$RLOOP\" ] || { echo 'ERROR: losetup failed for recovery image. Hints: modprobe loop; losetup -a; ls /dev/loop*'; false; }; } && "
+                # Retry partprobe up to 5 times for slow storage (partprobe first, then check)
+                "partprobe $RLOOP 2>/dev/null; "
+                "for _i in 1 2 3 4 5; do ls ${RLOOP}p* &>/dev/null && break; sleep 1; partprobe $RLOOP 2>/dev/null; done && "
+                "{ [ -b \"${RLOOP}p1\" ] || { echo \"ERROR: ${RLOOP}p1 not found after partprobe. Hint: Try running the script again (slow storage)\"; false; }; } && "
+                "mount -t hfsplus -o rw ${RLOOP}p1 $OC_REC && "
+                "{ mountpoint -q $OC_REC || { echo \"ERROR: $OC_REC is not mounted. Hints: file ${RLOOP}p1; blkid ${RLOOP}p1; dmesg | tail -5\"; false; }; } && "
+                # Set custom name via .contentDetails in blessed directory
+                "mkdir -p $OC_REC/System/Library/CoreServices && "
+                "rm -f $OC_REC/System/Library/CoreServices/.contentDetails 2>/dev/null; "
+                f"printf '%s' '{config.macos}' > $OC_REC/System/Library/CoreServices/.contentDetails && "
+                # Copy macOS installer icon as .VolumeIcon.icns for boot picker
+                "ICON=$(find $OC_REC -path '*/Install macOS*/Contents/Resources/InstallAssistant.icns' 2>/dev/null | head -1) && "
+                "if [ -n \"$ICON\" ]; then "
+                "rm -f $OC_REC/.VolumeIcon.icns; "
+                "cp \"$ICON\" $OC_REC/.VolumeIcon.icns && "
+                "echo \"Volume icon set from $ICON\"; "
+                "else echo \"No InstallAssistant.icns found, using default icon\"; fi && "
+                "{ umount $OC_REC || umount -l $OC_REC; } && losetup -d $RLOOP",
+            ],
+        ),
+        PlanStep(
+            title="Import and attach macOS recovery",
+            argv=["bash", "-c", rec_import],
+        ),
+    ]
+
+
 def build_plan(config: VmConfig) -> list[PlanStep]:
     issues = validate_config(config)
     if issues:
@@ -126,18 +297,7 @@ def build_plan(config: VmConfig) -> list[PlanStep]:
         ),
         *_smbios_steps(config, vmid),
         *_apple_services_steps(config, vmid),
-        PlanStep(
-            title="Attach EFI + TPM",
-            argv=[
-                "qm", "set", vmid,
-                "--efidisk0", f"{config.storage}:0,efitype=4m,pre-enrolled-keys=0",
-                "--tpmstate0", f"{config.storage}:0,version=v2.0",
-            ],
-        ),
-        PlanStep(
-            title="Create main disk",
-            argv=["qm", "set", vmid, "--virtio0", f"{config.storage}:{config.disk_gb}"],
-        ),
+        *_disk_steps(config, vmid, oc_disk),
         PlanStep(
             title="Build OpenCore boot disk",
             argv=[
@@ -154,73 +314,7 @@ def build_plan(config: VmConfig) -> list[PlanStep]:
                 ),
             ],
         ),
-        PlanStep(
-            title="Import and attach OpenCore disk",
-            argv=[
-                "bash", "-c",
-                "if qm disk import --help >/dev/null 2>&1; then IMPORT_CMD='qm disk import'; else IMPORT_CMD='qm importdisk'; fi && "
-                f'REF=$($IMPORT_CMD {shquote(vmid)} {shquote(str(oc_disk))} {shquote(config.storage)} 2>&1 | '
-                "grep 'successfully imported' | grep -oP \"'\\K[^']+\") && "
-                f'qm set {shquote(vmid)} --ide0 "$REF",media=disk && '
-                # Fix GPT header corruption from thin-provisioned LVM importdisk
-                'DEV=$(pvesm path "$REF") && '
-                f'dd if={shquote(str(oc_disk))} of="$DEV" bs=512 count=2048 conv=notrunc 2>/dev/null',
-            ],
-        ),
-        PlanStep(
-            title="Stamp recovery with Apple icon flavour",
-            argv=[
-                "bash", "-c",
-                # Trap to clean up loop device and temp dir on failure
-                "RLOOP=''; OC_REC=$(mktemp -d) && "
-                "trap '[ -n \"$RLOOP\" ] && { umount $OC_REC 2>/dev/null; losetup -d $RLOOP 2>/dev/null; }; rm -rf $OC_REC' EXIT; "
-                # Fix HFS+ dirty/lock flags so Linux mounts read-write,
-                # then write OpenCore .contentFlavour + .contentDetails
-                "python3 -c '"
-                "import struct,subprocess; "
-                f"img={shquote(str(recovery_raw))}; "
-                "out=subprocess.check_output([\"sgdisk\",\"-i\",\"1\",img],text=True); "
-                "start=int([l for l in out.splitlines() if \"First sector\" in l][0].split(\":\")[1].split(\"(\")[0].strip()); "
-                "off=start*512+1024+4; "
-                "f=open(img,\"r+b\"); f.seek(off); "
-                "a=struct.unpack(\">I\",f.read(4))[0]; "
-                "a=(a|0x100)&~0x800; "
-                "f.seek(off); f.write(struct.pack(\">I\",a)); "
-                "f.close(); print(\"HFS+ flags fixed\")' && "
-                # Cleanup stale loops from previous failed runs
-                f'for lo in $(losetup -j {shquote(str(recovery_raw))} -O NAME --noheadings 2>/dev/null); do umount -l $lo* 2>/dev/null; losetup -d $lo 2>/dev/null; done; '
-                f'RLOOP=$(losetup -fP --show {shquote(str(recovery_raw))}) && '
-                "{ [ -b \"$RLOOP\" ] || { echo 'ERROR: losetup failed for recovery image. Hints: modprobe loop; losetup -a; ls /dev/loop*'; false; }; } && "
-                # Retry partprobe up to 5 times for slow storage (partprobe first, then check)
-                "partprobe $RLOOP 2>/dev/null; "
-                "for _i in 1 2 3 4 5; do ls ${RLOOP}p* &>/dev/null && break; sleep 1; partprobe $RLOOP 2>/dev/null; done && "
-                "{ [ -b \"${RLOOP}p1\" ] || { echo \"ERROR: ${RLOOP}p1 not found after partprobe. Hint: Try running the script again (slow storage)\"; false; }; } && "
-                "mount -t hfsplus -o rw ${RLOOP}p1 $OC_REC && "
-                "{ mountpoint -q $OC_REC || { echo \"ERROR: $OC_REC is not mounted. Hints: file ${RLOOP}p1; blkid ${RLOOP}p1; dmesg | tail -5\"; false; }; } && "
-                # Set custom name via .contentDetails in blessed directory
-                "mkdir -p $OC_REC/System/Library/CoreServices && "
-                "rm -f $OC_REC/System/Library/CoreServices/.contentDetails 2>/dev/null; "
-                f"printf '%s' '{macos_label}' > $OC_REC/System/Library/CoreServices/.contentDetails && "
-                # Copy macOS installer icon as .VolumeIcon.icns for boot picker
-                "ICON=$(find $OC_REC -path '*/Install macOS*/Contents/Resources/InstallAssistant.icns' 2>/dev/null | head -1) && "
-                "if [ -n \"$ICON\" ]; then "
-                "rm -f $OC_REC/.VolumeIcon.icns; "
-                "cp \"$ICON\" $OC_REC/.VolumeIcon.icns && "
-                "echo \"Volume icon set from $ICON\"; "
-                "else echo \"No InstallAssistant.icns found, using default icon\"; fi && "
-                "{ umount $OC_REC || umount -l $OC_REC; } && losetup -d $RLOOP",
-            ],
-        ),
-        PlanStep(
-            title="Import and attach macOS recovery",
-            argv=[
-                "bash", "-c",
-                "if qm disk import --help >/dev/null 2>&1; then IMPORT_CMD='qm disk import'; else IMPORT_CMD='qm importdisk'; fi && "
-                f'REF=$($IMPORT_CMD {shquote(vmid)} {shquote(str(recovery_raw))} {shquote(config.storage)} 2>&1 | '
-                "grep 'successfully imported' | grep -oP \"'\\K[^']+\") && "
-                f'qm set {shquote(vmid)} --ide2 "$REF",media=disk',
-            ],
-        ),
+        *_import_steps(config, vmid, oc_disk, recovery_raw),
         PlanStep(
             title="Set boot order",
             argv=["qm", "set", vmid, "--boot", "order=ide2;virtio0;ide0"],
